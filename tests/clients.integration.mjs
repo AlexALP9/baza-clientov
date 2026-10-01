@@ -4,7 +4,8 @@ import {blankClient,fields,statuses,selectClients,formatCallDate,validateClient}
 
 const origin=process.env.TEST_ORIGIN||'http://127.0.0.1:5173';
 if(!['127.0.0.1','localhost'].includes(new URL(origin).hostname))throw new Error('Use an isolated local server for these tests.');
-const identity={'oai-authenticated-user-id':'contact-integration-test','oai-authenticated-user-email':'contact-test@example.test'};
+async function login(code){const response=await fetch(origin+'/api/login',{method:'POST',headers:{'Content-Type':'application/json','CF-Connecting-IP':'192.0.2.100'},body:JSON.stringify({code})});assert.equal(response.status,200);return {cookie:response.headers.get('set-cookie').split(';')[0]};}
+const identity=await login(process.env.TEST_CODE_A),otherIdentity=await login(process.env.TEST_CODE_B);
 const created=[];
 async function request(path='',options={}){return fetch(origin+'/api/clients'+path,{...options,headers:{...identity,...options.headers}});}
 async function jsonSave(client,method='POST'){return request('',{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(client)});}
@@ -37,9 +38,9 @@ try{
  console.log('PASS: image deletion, initials retained, date/comment editing and clearing');
  assert.equal((await fetch(origin+'/api/clients')).status,401);
  assert.equal((await fetch(origin+'/api/clients/photo?id='+c.id)).status,401);
- assert.equal((await request('/photo?id='+c.id,{headers:{...identity,'oai-authenticated-user-id':'another-test-user'}})).status,404);
+ assert.equal((await request('/photo?id='+c.id,{headers:otherIdentity})).status,404);
  assert.equal((await request('',{method:'PUT',headers:{...identity,'Content-Type':'application/json','Origin':'https://different.test'},body:JSON.stringify(c)})).status,403);
- const other=await request('',{headers:{...identity,'oai-authenticated-user-id':'another-test-user'}});assert.equal((await other.json()).clients.length,0);
+ const other=await request('',{headers:otherIdentity});assert.equal((await other.json()).clients.length,0);
  const forged=await jsonSave({...c,status:0,photoKey:'stolen-image'},'PUT');assert.equal(forged.status,200);assert.equal((await forged.json()).client.photoKey,'');
  assert.equal(statuses.length,7);for(let status=0;status<7;status++)assert.equal(validateClient({...c,status}).status,status);
  console.log('PASS: seven statuses, authentication and owner isolation, server-owned image keys');

@@ -1,0 +1,38 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { createSession, SESSION_SECONDS } from '../app/session-core.ts';
+const origin=process.env.TEST_ORIGIN;
+if(!origin||!['127.0.0.1','localhost'].includes(new URL(origin).hostname))throw new Error('Local test server required');
+const config={ACCESS_CODES:process.env.TEST_ACCESS_CODES,SESSION_SECRET:process.env.TEST_SESSION_SECRET};
+const auth=createSession(config);
+const code=process.env.TEST_CODE_A,codeB=process.env.TEST_CODE_B;
+const login=(code,ip='192.0.2.10',extra={})=>fetch(origin+'/api/login',{method:'POST',headers:{'Content-Type':'application/json','CF-Connecting-IP':ip,...extra},body:JSON.stringify({code})});
+const call=(path,cookie,options={})=>fetch(origin+path,{...options,headers:{...(cookie?{cookie}:{}),...options.headers}});
+const cookieOf=r=>r.headers.get('set-cookie')?.split(';')[0];
+for(const [path,method] of [['/api/clients','GET'],['/api/clients','POST'],['/api/clients','PUT'],['/api/clients?id=x','DELETE'],['/api/clients/photo?id=x','GET']])assert.equal((await call(path,null,{method})).status,401);
+assert.equal((await call('/api/clients',null,{headers:{'oai-authenticated-user-id':'contact-integration-test','oai-authenticated-user-email':'test@example.test'}})).status,401);
+assert.equal((await login(code,'192.0.2.11',{Origin:'https://evil.test'})).status,403);
+let r=await login(code);assert.equal(r.status,200);const a=cookieOf(r);assert.match(r.headers.get('set-cookie'),/HttpOnly; Secure; SameSite=Lax; Path=\//);
+r=await login(codeB);assert.equal(r.status,200);const b=cookieOf(r);
+const expired=(await auth.makeCookie('contact-integration-test',Date.now()-(SESSION_SECONDS+10)*1000)).split(';')[0];
+const forged=a.slice(0,20)+(a[20]==='A'?'B':'A')+a.slice(21);
+for(const cookie of [expired,forged])for(const path of ['/api/clients','/api/clients/photo?id=x'])assert.equal((await call(path,cookie)).status,401);
+let id;
+try{
+ const form=new FormData();form.set('client',JSON.stringify({company:'Auth isolation fixture',status:0}));form.set('photo',new File([await readFile(new URL('./fixtures/logo.png',import.meta.url))],'logo.png',{type:'image/png'}));
+ r=await call('/api/clients',a,{method:'POST',body:form});assert.equal(r.status,201);id=(await r.json()).client.id;
+ assert.equal((await call('/api/clients/photo?id='+id,a)).status,200);
+ assert.equal((await call('/api/clients/photo?id='+id,b)).status,404);
+ assert.ok(!(await (await call('/api/clients',b)).json()).clients.some(c=>c.id===id));
+ assert.equal((await call('/api/clients',b,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,company:'stolen',status:0})})).status,404);
+ assert.equal((await call('/api/clients?id='+id,b,{method:'DELETE'})).status,404);
+}finally{if(id)assert.equal((await call('/api/clients?id='+id,a,{method:'DELETE'})).status,200);}
+r=await call('/api/logout',a,{method:'POST',headers:{Origin:'https://evil.test'}});assert.equal(r.status,403);
+r=await call('/api/logout',a,{method:'POST'});assert.equal(r.status,200);assert.match(r.headers.get('set-cookie'),/Max-Age=0/);assert.equal((await call('/api/clients',cookieOf(r))).status,401);
+const start=Date.now();r=await login('wrong','192.0.2.20');assert.equal(r.status,401);assert.ok(Date.now()-start>=1100);
+for(let i=0;i<4;i++)assert.equal((await login('wrong','192.0.2.20')).status,401);
+r=await login(code,'192.0.2.20');assert.equal(r.status,429);assert.equal(r.headers.get('retry-after'),'600');
+assert.equal((await login(code,'192.0.2.21')).status,200);
+const parallel=await Promise.all(Array.from({length:8},()=>login('wrong','192.0.2.30')));
+assert.equal(parallel.filter(r=>r.status===401).length,5);assert.equal(parallel.filter(r=>r.status===429).length,3);
+console.log('PASS: auth routes, delay, atomic D1 rate limiting, forged/expired cookies, logout, API/photo ownership');

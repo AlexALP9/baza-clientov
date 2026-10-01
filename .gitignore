@@ -45,5 +45,6 @@ next-env.d.ts
 /outputs/
 /work/
 
-# Generated TypeScript cache
+# Local secrets and generated compiler cache
+.dev.vars*
 *.tsbuildinfo
